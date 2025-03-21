@@ -14,4 +14,25 @@ a unified mlflow wrapper that standardizes experiment tracking, artifact logging
 
 ## usage
 
+do the following:
+
+install the package:
+
+```bash
+pip install mlops-wrapper
+```
+
+then import it  `mlops_wrapper.mlflow_wrapper import mlflow_experiment` 
+
+then decorate your training function with the `@mlflow_experiment` decorator
+
+```python
+
+@mlflow_experiment("MyExperiment")
+def train_model(epochs=5):
+    ## your training code
+    return {"params": {...}, "metrics": {...}}
+
+```
+
 yet to be written

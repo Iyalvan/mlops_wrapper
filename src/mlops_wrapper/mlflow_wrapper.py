@@ -11,20 +11,25 @@ class MLflowWrapper:
         experiment_name: str,
         run_name_prefix: str = "run",
         tracking_uri: str = None,
+        autolog_enabled: bool = False,
+        autolog_config: dict = None,
     ):
         """
-        initialize the mlflowwrapper with the experiment name and optional run name prefix.
-        optionally, set the mlflow tracking uri.
+        initialize the mlflow wrapper with experiment name, optional run prefix, tracking uri,
+        autolog_enabled flag, and autolog_config parameters dynamically passed.
         """
         self.experiment_name = experiment_name
         self.run_name_prefix = run_name_prefix
+        self.autolog_enabled = autolog_enabled
+        self.autolog_config = autolog_config or {}
+
         if tracking_uri:
             mlflow.set_tracking_uri(tracking_uri)
         mlflow.set_experiment(experiment_name)
 
     def _generate_run_name(self) -> str:
         """
-        generate a unique run name using a prefix, current timestamp, and a short unique identifier.
+        generate a unique run name using prefix, timestamp, and uuid.
         """
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         unique_id = uuid.uuid4().hex[:6]
@@ -32,13 +37,20 @@ class MLflowWrapper:
 
     def start_run(self, run_name: str = None):
         """
-        start an mlflow run. if a run name is not provided, generate one.
+        start an mlflow run, attempt autolog first. fall back if autolog fails or is disabled.
         """
         if not run_name:
             run_name = self._generate_run_name()
-        self.run = mlflow.start_run(run_name=run_name)
-        mlflow.set_tag("experiment_name", self.experiment_name)
-        return self.run
+            
+        if self.autolog_enabled:
+            mlflow.autolog(**self.autolog_config)
+            mlflow.set_experiment(self.experiment_name) # to set experiment name after the autolog enabled
+            mlflow.set_tag("experiment_name", self.experiment_name)
+            mlflow.set_tag("run_name",run_name)
+        else:
+            self.run = mlflow.start_run(run_name=run_name)
+            mlflow.set_tag("experiment_name", self.experiment_name)
+            return self.run
 
     def log_params(self, params: dict):
         """
@@ -72,6 +84,7 @@ class MLflowWrapper:
         model_uri = f"runs:/{run_id}/{model_local_path}"
         result = mlflow.register_model(model_uri, model_name)
         mlflow.set_tag("registered_model", model_name)
+        mlflow.log_param("model_version", result.version)
         return result
 
     def end_run(self):
@@ -82,7 +95,11 @@ class MLflowWrapper:
 
 
 def mlflow_experiment(
-    experiment_name: str, run_name_prefix: str = "run", tracking_uri: str = None
+    experiment_name: str,
+    run_name_prefix: str = "run",
+    tracking_uri: str = None,
+    autolog_enabled: bool = True,
+    autolog_config: dict = None,
 ):
     """
     decorator for wrapping training functions. it ensures:
@@ -102,33 +119,49 @@ def mlflow_experiment(
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             mlflow_wrapper = MLflowWrapper(
-                experiment_name, run_name_prefix, tracking_uri
+                experiment_name,
+                run_name_prefix,    
+                tracking_uri,
+                autolog_enabled,
+                autolog_config,
             )
-            run = mlflow_wrapper.start_run()
-            try:
-                result = func(*args, **kwargs)
 
-                if "params" in result and isinstance(result["params"], dict):
+            try:
+                mlflow_wrapper.start_run()
+                result = func(*args, **kwargs) or {}
+                active_run = mlflow.active_run()
+                if active_run is None:
+                    if autolog_enabled:
+                        raise RuntimeError(
+                        "mlflow autolog was enabled, but no active run detected. "
+                        "the library used might not support autologging or something went wrong. "
+                        "please verify or fallback to manual logging."
+                        )
+                    else:
+                        raise RuntimeError(
+                            "no active mlflow run detected after execution. "
+                            "manual logging was expected but failed. please verify."
+                        )
+
+                if isinstance(result.get("params"), dict):
                     mlflow_wrapper.log_params(result["params"])
-                if "metrics" in result and isinstance(result["metrics"], dict):
+
+                if isinstance(result.get("metrics"), dict):
                     mlflow_wrapper.log_metrics(result["metrics"])
 
                 if "artifacts" in result:
                     mlflow_wrapper.log_artifacts(result["artifacts"])
 
-                if "model_local_path" in result and "model_name" in result:
+                if result.get("model_local_path") and result.get("model_name"):
                     reg_result = mlflow_wrapper.register_model(
                         result["model_local_path"], result["model_name"]
                     )
                     mlflow.log_param("model_version", reg_result.version)
-
-                return result
             except Exception as e:
                 mlflow.log_param("failure_reason", str(e))
                 raise
             finally:
                 mlflow_wrapper.end_run()
-
+            return result
         return wrapper
-
     return decorator
