@@ -60,10 +60,7 @@ def train_my_model():
     return {
         "params": {"max_depth": 5, "n_estimators": 100},
         "metrics": {"train_accuracy": train_accuracy, "test_accuracy": test_accuracy},
-        "tags": {"model_type": "random_forest"},
-        "artifacts": "path/to/local/artifact_dir_or_file",
-        "model_local_path": "path/to/saved_model",
-        "model_name": "my_registered_model"
+        "tags": {"model_type": "random_forest"}
     }
 
 if __name__ == "__main__":
@@ -91,7 +88,10 @@ def train_custom_model():
     return {
         "params": {"some_param": 123},
         "metrics": {"accuracy": accuracy},
-        "tags": {"special_run": True}
+        "tags": {"special_run": True},
+        "artifacts": "path/to/local/artifact_dir_or_file",
+        "model_local_path": "path/to/saved_model",
+        "model_name": "my_registered_model"
     }
 
 ```
