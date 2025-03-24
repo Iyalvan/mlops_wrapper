@@ -98,7 +98,7 @@ def mlflow_experiment(
     experiment_name: str,
     run_name_prefix: str = "run",
     tracking_uri: str = None,
-    autolog_enabled: bool = True,
+    autolog_enabled: bool = False,
     autolog_config: dict = None,
 ):
     """
