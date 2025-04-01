@@ -11,6 +11,8 @@ a unified mlflow wrapper that standardizes experiment tracking, artifact logging
 - **extendable**: easily add custom tags or additional params by returning them in a dictionary from your decorated function.
 - **consistent experiment tracking**: standardize how your team logs experiments, making it easier to compare runs and share best practices.
 
+![image](https://github.com/user-attachments/assets/f6830c43-cc6c-4492-97b1-2d48027bbf39)
+
 ## features
 
 - **consistent logging**: standardized interface for logging parameters, metrics, and artifacts.
