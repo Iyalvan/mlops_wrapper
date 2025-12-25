@@ -35,22 +35,46 @@ class MLflowWrapper:
         unique_id = uuid.uuid4().hex[:6]
         return f"{self.run_name_prefix}_{timestamp}_{unique_id}"
 
-    def start_run(self, run_name: str = None):
+    def start_run(self, run_name: str = None, tags: dict = None):
         """
-        start an mlflow run, attempt autolog first. fall back if autolog fails or is disabled.
+        start an mlflow run. if autolog is enabled, it's called before starting the run.
+        autolog must be enabled before the run starts to properly hook into training APIs.
+
+        args:
+            run_name: optional run name (if None, generates uuid-based name)
+            tags: optional dict of tags to log (project-specific metadata)
         """
+        # setup aws credentials if using s3 backend
+        aws_profile = os.getenv('AWS_PROFILE')
+        if aws_profile:
+            try:
+                import boto3
+                boto3.setup_default_session(profile_name=aws_profile)
+                print(f"  aws profile: {aws_profile}")
+            except Exception as e:
+                print(f"warning: aws profile setup failed: {e}")
+
         if not run_name:
             run_name = self._generate_run_name()
-            
+
+        # enable autolog BEFORE starting run if requested (per mlflow docs)
         if self.autolog_enabled:
             mlflow.autolog(**self.autolog_config)
-            mlflow.set_experiment(self.experiment_name) # to set experiment name after the autolog enabled
-            mlflow.set_tag("experiment_name", self.experiment_name)
-            mlflow.set_tag("run_name",run_name)
-        else:
-            self.run = mlflow.start_run(run_name=run_name)
-            mlflow.set_tag("experiment_name", self.experiment_name)
-            return self.run
+
+        # always explicitly start a run with proper name
+        self.run = mlflow.start_run(run_name=run_name)
+
+        # common tagging for both autolog and manual modes
+        mlflow.set_tag("experiment_name", self.experiment_name)
+        mlflow.set_tag("run_name", run_name)
+
+        # add project-specific tags if provided
+        if tags:
+            for key, value in tags.items():
+                mlflow.set_tag(key, str(value))
+            print(f"  custom tags: {len(tags)} tags added")
+
+        return self.run
 
     def log_params(self, params: dict):
         """
@@ -96,9 +120,10 @@ class MLflowWrapper:
 
 def mlflow_experiment(
     experiment_name: str,
-    run_name_prefix: str = "run",
+    run_name: str = None,
+    tags: dict = None,
     tracking_uri: str = None,
-    autolog_enabled: bool = False,
+    autolog_enabled: bool = True,
     autolog_config: dict = None,
 ):
     """
@@ -120,34 +145,58 @@ def mlflow_experiment(
         def wrapper(*args, **kwargs):
             mlflow_wrapper = MLflowWrapper(
                 experiment_name,
-                run_name_prefix,    
-                tracking_uri,
-                autolog_enabled,
-                autolog_config,
+                tracking_uri=tracking_uri,
+                autolog_enabled=autolog_enabled,
+                autolog_config=autolog_config,
             )
 
             try:
-                mlflow_wrapper.start_run()
+                mlflow_wrapper.start_run(run_name=run_name, tags=tags)
                 result = func(*args, **kwargs) or {}
                 active_run = mlflow.active_run()
                 if active_run is None:
-                    if autolog_enabled:
-                        raise RuntimeError(
-                        "mlflow autolog was enabled, but no active run detected. "
-                        "the library used might not support autologging or something went wrong. "
-                        "please verify or fallback to manual logging."
-                        )
-                    else:
-                        raise RuntimeError(
-                            "no active mlflow run detected after execution. "
-                            "manual logging was expected but failed. please verify."
+                    raise RuntimeError("no active mlflow run after training")
+
+                # check if autolog captured anything
+                autolog_params = set(active_run.data.params.keys())
+                autolog_metrics = set(active_run.data.metrics.keys())
+
+                # detect autolog failure (when enabled but captured nothing)
+                if autolog_enabled and len(autolog_params) == 0:
+                    print("warning: autolog enabled but captured 0 params")
+                    print("  framework may not support autolog (e.g., catboost)")
+                    print("  falling back to manual param logging")
+
+                    # require params in return dict
+                    if not isinstance(result.get("params"), dict) or len(result.get("params", {})) == 0:
+                        raise ValueError(
+                            "autolog failed and no params in return dict. "
+                            "please extract model hyperparameters manually and return {'params': {...}}"
                         )
 
-                if isinstance(result.get("params"), dict):
-                    mlflow_wrapper.log_params(result["params"])
+                # detect collisions BEFORE logging custom params/metrics
+                custom_params = result.get("params", {})
+                custom_metrics = result.get("metrics", {})
 
-                if isinstance(result.get("metrics"), dict):
-                    mlflow_wrapper.log_metrics(result["metrics"])
+                param_collisions = autolog_params & set(custom_params.keys())
+                metric_collisions = autolog_metrics & set(custom_metrics.keys())
+
+                if param_collisions:
+                    print(f"warning: param collision detected: {sorted(param_collisions)}")
+                    print("  autolog values retained, skipping duplicate custom params")
+                    custom_params = {k: v for k, v in custom_params.items() if k not in param_collisions}
+
+                if metric_collisions:
+                    print(f"warning: metric collision detected: {sorted(metric_collisions)}")
+                    print("  autolog values retained, skipping duplicate custom metrics")
+                    print("  suggestion: prefix custom metrics (e.g., 'custom.metric_name')")
+                    custom_metrics = {k: v for k, v in custom_metrics.items() if k not in metric_collisions}
+
+                # log non-colliding custom params/metrics
+                if custom_params:
+                    mlflow_wrapper.log_params(custom_params)
+                if custom_metrics:
+                    mlflow_wrapper.log_metrics(custom_metrics)
 
                 if "artifacts" in result:
                     mlflow_wrapper.log_artifacts(result["artifacts"])
@@ -157,8 +206,14 @@ def mlflow_experiment(
                         result["model_local_path"], result["model_name"]
                     )
                     mlflow.log_param("model_version", reg_result.version)
+                
+                # mark run as successful
+                mlflow.set_tag("mlops.status", "success")
             except Exception as e:
-                mlflow.log_param("failure_reason", str(e))
+                # log error as tags, not params (params are for hyperparameters)
+                mlflow.set_tag("mlops.status", "failed")
+                mlflow.set_tag("mlops.error_type", type(e).__name__)
+                mlflow.set_tag("mlops.error_message", str(e)[:500])  # truncate long errors
                 raise
             finally:
                 mlflow_wrapper.end_run()

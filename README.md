@@ -1,109 +1,332 @@
-# mlops-wrapper
-custom python wrapper around mlflow
+# mlops_wrapper
 
-a unified mlflow wrapper that standardizes experiment tracking, artifact logging, and model registration across teams and projects. by providing decorators and base classes, this wrapper reduces boilerplate code and enforces best practices for mlflow usage.
+schema-agnostic mlflow wrapper for consistent experiment tracking across ML projects.
 
+## what is this?
 
-## why use this wrapper?
+a python wrapper around mlflow that handles:
+- run lifecycle (start, log, end)
+- autolog orchestration with intelligent fallback
+- collision detection for params/metrics
+- error handling and tagging
+- AWS credentials setup for S3 artifact storage
 
-- **simplify mlflow usage**: no need to manually start/stop mlflow runs or remember to log parameters/metrics/artifacts each time.
-- **built-in flexibility**: pass a single flag to enable autologging or choose to manually specify which details get logged.
-- **extendable**: easily add custom tags or additional params by returning them in a dictionary from your decorated function.
-- **consistent experiment tracking**: standardize how your team logs experiments, making it easier to compare runs and share best practices.
+**core principle:** wrapper is generic. your project builds metadata (tags, run names) from its config and passes them in.
 
-![image](https://github.com/user-attachments/assets/f6830c43-cc6c-4492-97b1-2d48027bbf39)
+## why use this?
 
-## features
+**without wrapper:**
+```python
+# 30+ lines per training script
+mlflow.set_tracking_uri(...)
+mlflow.set_experiment(...)
+mlflow.start_run(run_name=...)
+mlflow.set_tag("tag1", value1)
+mlflow.set_tag("tag2", value2)
+# ... 20 more tags
+mlflow.log_param("param1", value1)
+# ... handle autolog failures
+# ... detect collisions
+# ... error handling
+mlflow.end_run()
+```
 
-- **consistent logging**: standardized interface for logging parameters, metrics, and artifacts.
-- **model registry integration**: automatically register models in mlflow’s model registry.
-- **decorator & base class**: use a python decorator (`@mlflow_experiment`) or extend `baseexperiment` to minimize boilerplate code.
-- **error handling**: automatically logs exceptions and ensures mlflow runs are closed gracefully.
+**with wrapper:**
+```python
+@mlflow_experiment(
+    experiment_name="my-project",
+    run_name="exp1_catboost_20251225_143052",
+    tags={...},  # project builds these
+)
+def train():
+    return {'params': {...}, 'metrics': {...}}
+```
 
+## design principles
 
-## quick start
+1. **schema-agnostic:** no hardcoded assumptions about your config structure
+2. **metadata comes from project:** wrapper accepts pre-built tags/run_name
+3. **autolog with fallback:** tries autolog first, falls back to manual if it fails
+4. **collision detection:** warns if your metrics clash with autolog
+5. **error transparency:** logs failures as tags, doesn't swallow errors
 
-do the following:
+## responsibilities
 
-install the package:
+**wrapper handles:**
+- mlflow lifecycle (start_run, end_run)
+- autolog enablement (before start_run per mlflow docs)
+- autolog failure detection (0 params logged = failure)
+- param/metric collision detection and warnings
+- error logging as tags (mlops.status, mlops.error_type)
+- AWS credentials setup (boto3 session from AWS_PROFILE)
+
+**your project handles:**
+- building run names from your config schema
+- extracting tags from your domain (cost filters, data splits, etc.)
+- extracting model hyperparameters manually when autolog fails
+
+## installation
 
 ```bash
 pip install mlops-wrapper
 ```
 
-then import it  `mlops_wrapper.mlflow_wrapper import mlflow_experiment` 
+or for development:
+```bash
+pip install -e /path/to/mlops_wrapper_repo
+```
 
-then decorate your training function with the `@mlflow_experiment` decorator
+## usage
 
-### for autologging
+### basic example (sklearn - autolog works)
 
-with autologging enabled, the mlflow will automatically log all parameters, metrics, and artifacts from your training function with its intelligence.
-you can also pass extra/custom tags/params to be logged by returning them in a dictionary from your training function.
+```python
+from mlops_wrapper.mlflow_wrapper import mlflow_experiment
 
-> note: you cannot override the parameters/metrics logged by autologging, but you can add extra tags/params.
+@mlflow_experiment(
+    experiment_name="sklearn-test",
+    run_name="rf_experiment_20251225",
+    tags={'model': 'random_forest', 'team': 'ml-ops'},
+    autolog_enabled=True
+)
+def train():
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.datasets import make_classification
 
-supported autologging libraries: refer to [mlflow documentation](https://mlflow.org/docs/latest/tracking/autolog#supported-libraries)
+    X, y = make_classification(n_samples=100, n_features=20)
+    model = RandomForestClassifier(n_estimators=100, max_depth=5)
+    model.fit(X, y)
 
+    # autolog captures params automatically
+    # return custom metrics
+    return {
+        'metrics': {'custom_score': 0.95}
+    }
+
+train()
+```
+
+### catboost example (autolog fails - manual fallback)
 
 ```python
 @mlflow_experiment(
-    experiment_name="my_experiment",
-    run_name_prefix="demo_run",
-    tracking_uri="http://localhost:5000", 
-    autolog_enabled=True,
-    autolog_config={"log_models": True}
+    experiment_name="catboost-test",
+    run_name="cb_experiment_20251225",
+    tags={'model': 'catboost', 'task': 'regression'},
+    autolog_enabled=True  # will fail, wrapper detects and requires manual params
 )
-def train_my_model():
-    ### your training logic here
-    train_accuracy = 0.95
-    test_accuracy = 0.90
+def train():
+    from catboost import CatBoostRegressor
+    import numpy as np
 
-    # optionally return extra tags/params for logging this works even for autolog=True
+    X = np.random.rand(100, 10)
+    y = np.random.rand(100)
+
+    model = CatBoostRegressor(iterations=10, depth=3, verbose=False)
+    model.fit(X, y)
+
+    # autolog will capture 0 params (known mlflow issue #6073)
+    # wrapper detects this and requires manual params
     return {
-        "params": {"max_depth": 5, "n_estimators": 100},
-        "metrics": {"train_accuracy": train_accuracy, "test_accuracy": test_accuracy},
-        "tags": {"model_type": "random_forest"}
+        'params': {  # required when autolog fails
+            'model.iterations': 10,
+            'model.depth': 3,
+            'n_features': 10
+        },
+        'metrics': {
+            'train_rmse': 0.15
+        }
     }
 
-if __name__ == "__main__":
-    train_my_model()
-
+train()
 ```
 
-- run mlflow ui in your terminal and open http://localhost:5000 (adjust as needed).
-- you will see an experiment named my_experiment with your run logs, including any parameters and metrics.
+**what happens:**
+```
+warning: autolog enabled but captured 0 params
+  framework may not support autolog (e.g., catboost)
+  falling back to manual param logging
+```
 
-
-### for manual logging
+### project-level integration pattern
 
 ```python
+# in your project's training/train.py
 
-@mlflow_experiment("your-manual-experiment-name")
-def train_custom_model():
-    # manual training code
-    model = ...
-    model.fit(...)
-    # compute metrics, etc.
-    accuracy = ...
-    
-    #  return a dictionary with params, metrics, and tags to be logged
-    return {
-        "params": {"some_param": 123},
-        "metrics": {"accuracy": accuracy},
-        "tags": {"special_run": True},
-        "artifacts": "path/to/local/artifact_dir_or_file",
-        "model_local_path": "path/to/saved_model",
-        "model_name": "my_registered_model"
-    }
+from mlflow_integration import build_run_name, build_tags  # your helpers
+from mlops_wrapper.mlflow_wrapper import mlflow_experiment
 
+def main():
+    config = load_configs()
+
+    # project builds metadata from config
+    tags = build_tags(config)  # extracts 21+ domain-specific tags
+    run_name = build_run_name(
+        model_type=config['model']['type'],
+        filters=config['data']['filters'],
+        timestamp='20251225_143052'
+    )
+
+    # pass pre-built metadata to wrapper
+    wrapped_train = mlflow_experiment(
+        experiment_name="cost-prediction",
+        run_name=run_name,
+        tags=tags,
+        tracking_uri="https://mlflow.example.com",
+        autolog_enabled=True
+    )(train_pipeline)
+
+    wrapped_train(config)
 ```
 
-## feedback or contributions
+## autolog behavior
 
-this is a simple approach that works for some use cases. we would love your thoughts:
+**autolog enabled (default):**
+- wrapper calls `mlflow.autolog()` before `start_run()`
+- after training, checks if params were captured
+- if 0 params logged: warns and requires manual params in return dict
+- if params logged: autolog worked, custom params/metrics optional
 
-	•	is it helpful for your projects?
-	•	any additional features or integrations you would like to see?
-	•	found a bug or have a suggestion? open an issue or submit a pull request.
+**supported frameworks:**
+- sklearn: ✅ works
+- xgboost: ✅ works
+- lightgbm: ✅ works
+- pytorch: ✅ works
+- tensorflow: ✅ works
+- catboost: ❌ broken (mlflow issue #6073) - manual fallback required
 
-hope this decorator reduces the friction of using mlflow and helps standardize your mlops workflows. thanks for checking it out!
+**collision detection:**
+```python
+# autolog captures: accuracy, loss
+# you return: accuracy, custom_metric
+
+# wrapper behavior:
+# - keeps autolog's accuracy (autolog wins)
+# - logs your custom_metric
+# - warns: "param collision detected: ['accuracy']"
+# - suggests: "prefix custom metrics (e.g., 'custom.accuracy')"
+```
+
+## return dict contract
+
+```python
+{
+    'params': dict,       # required if autolog fails, optional otherwise
+    'metrics': dict,      # optional (custom metrics)
+    'artifacts': str,     # optional (path to artifact dir/file)
+    'model_local_path': str,  # optional (for model registry)
+    'model_name': str     # optional (for model registry)
+}
+```
+
+## error handling
+
+```python
+@mlflow_experiment(experiment_name="test")
+def train():
+    raise ValueError("something broke")
+
+# wrapper behavior:
+# - catches exception
+# - logs tags:
+#   - mlops.status = "failed"
+#   - mlops.error_type = "ValueError"
+#   - mlops.error_message = "something broke"
+# - re-raises exception
+# - closes mlflow run
+```
+
+## ci/cd integration
+
+
+### github actions example
+
+```yaml
+- name: train model
+  env:
+    MLFLOW_TRACKING_URI: https://mlflow.company.com
+    AWS_PROFILE: ml-dev # or set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY or github aws jwt auth
+  run: |
+    python training/train.py --run-prefix ci-${{ github.run_id }}
+```
+
+wrapper automatically picks up:
+- `MLFLOW_TRACKING_URI` env var
+- `AWS_PROFILE` for boto3 session
+
+## testing
+
+### verify wrapper is working
+
+```python
+# test_wrapper.py
+from mlops_wrapper.mlflow_wrapper import mlflow_experiment
+import os
+
+os.environ["MLFLOW_TRACKING_URI"] = "file:./mlruns"
+
+@mlflow_experiment(
+    experiment_name="test-run",
+    run_name="verify-wrapper-works",
+    tags={'test': 'true'}
+)
+def test_train():
+    return {
+        'params': {'test_param': 123},
+        'metrics': {'test_metric': 0.99}
+    }
+
+test_train()
+print("✓ check ./mlruns for logged experiment")
+```
+
+run:
+```bash
+python test_wrapper.py
+mlflow ui --backend-store-uri file:./mlruns
+```
+
+open http://localhost:5000 and verify:
+- experiment "test-run" exists
+- run "verify-wrapper-works" logged
+- tags, params, metrics present
+
+## migration from manual mlflow
+
+**before (manual):**
+```python
+def train():
+    mlflow.set_tracking_uri(...)
+    mlflow.set_experiment(...)
+
+    with mlflow.start_run(run_name=...):
+        mlflow.set_tag(...)
+        # training
+        mlflow.log_param(...)
+        mlflow.log_metric(...)
+        mlflow.log_artifacts(...)
+    # 50+ lines
+```
+
+**after (wrapper):**
+```python
+@mlflow_experiment(experiment_name=..., run_name=..., tags={...})
+def train():
+    # training
+    return {'params': {...}, 'metrics': {...}}
+# 5 lines
+```
+
+## requirements
+
+- python >=3.8
+- mlflow >=2.9.0 (supports 3.x)
+- boto3 >=1.28.0 (for S3 artifact storage)
+
+## contributing
+
+issues and PRs welcome at https://github.com/Iyalvan/mlops_wrapper
+
+## license
+
+see LICENSE file
