@@ -73,7 +73,7 @@ pip install mlops-wrapper
 
 or for development:
 ```bash
-pip install -e /path/to/mlops_wrapper
+pip install -e /path/to/mlops_wrapper_repo
 ```
 
 ## usage
@@ -238,16 +238,6 @@ def train():
 
 ## ci/cd integration
 
-### gitlab ci example
-
-```yaml
-train:
-  stage: ml
-  script:
-    - export MLFLOW_TRACKING_URI=https://mlflow.company.com
-    - export AWS_PROFILE=ml-dev
-    - python training/train.py --run-prefix ci-${CI_PIPELINE_ID}
-```
 
 ### github actions example
 
@@ -255,7 +245,7 @@ train:
 - name: train model
   env:
     MLFLOW_TRACKING_URI: https://mlflow.company.com
-    AWS_PROFILE: ml-dev
+    AWS_PROFILE: ml-dev # or set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY or github aws jwt auth
   run: |
     python training/train.py --run-prefix ci-${{ github.run_id }}
 ```
