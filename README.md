@@ -7,6 +7,8 @@ schema-agnostic mlflow wrapper for consistent experiment tracking across ML proj
 a python wrapper around mlflow that handles:
 - run lifecycle (start, log, end)
 - autolog orchestration with intelligent fallback
+- framework-agnostic model logging (catboost, sklearn, xgboost, lightgbm, pytorch, tensorflow)
+- automatic signature inference with type conversion for robust serving
 - collision detection for params/metrics
 - error handling and tagging
 - AWS credentials setup for S3 artifact storage
@@ -144,8 +146,69 @@ train()
 **what happens:**
 ```
 warning: autolog enabled but captured 0 params
-  framework may not support autolog (e.g., catboost)
+  this typically means:
+    - framework has no autolog support (e.g., catboost)
+    - model was not trained within the mlflow run context
   falling back to manual param logging
+```
+
+### model logging example
+
+```python
+@mlflow_experiment(
+    experiment_name="catboost-model-logging",
+    run_name="cb_with_model_20260128",
+    tags={'model': 'catboost'},
+    log_model=True  # enable model artifact logging (default: True)
+)
+def train():
+    from catboost import CatBoostRegressor
+    import pandas as pd
+    import numpy as np
+
+    # prepare data
+    X_train = pd.DataFrame(np.random.rand(100, 10), columns=[f'f{i}' for i in range(10)])
+    y_train = np.random.rand(100)
+
+    model = CatBoostRegressor(iterations=50, depth=4, verbose=False)
+    model.fit(X_train, y_train)
+
+    predictions = model.predict(X_train)
+
+    # return model with inputs for signature inference
+    return {
+        'params': {'iterations': 50, 'depth': 4},
+        'metrics': {'train_rmse': 0.12},
+        'model': model,  # triggers automatic framework detection and logging
+        'model_inputs': X_train.head(5),  # for signature inference
+        'model_predictions': predictions[:5]  # for signature output schema
+    }
+
+train()
+```
+
+**what happens:**
+- wrapper detects framework (catboost)
+- calls `mlflow.catboost.log_model()` with proper signature
+- converts int64 features to double (prevents serving errors with boolean features)
+- logs input_example for inference validation
+- adds tags: `mlops.model_framework`, `mlops.model_logged_via`
+
+**model logging control:**
+```python
+# local development - skip model logging to save storage
+@mlflow_experiment(..., log_model=False)
+
+# or via environment variable
+export MLFLOW_LOG_MODEL=false  # overrides decorator parameter
+```
+
+**important:** to avoid duplicate model logging, disable autolog's model logging:
+```python
+@mlflow_experiment(
+    ...,
+    autolog_config={'log_models': False}  # let explicit logging handle it
+)
 ```
 
 ### project-level integration pattern
@@ -207,15 +270,41 @@ def main():
 # - suggests: "prefix custom metrics (e.g., 'custom.accuracy')"
 ```
 
+## model logging
+
+**supported frameworks (auto-detected):**
+- catboost: ✅ `mlflow.catboost.log_model()`
+- sklearn: ✅ `mlflow.sklearn.log_model()`
+- xgboost: ✅ `mlflow.xgboost.log_model()`
+- lightgbm: ✅ `mlflow.lightgbm.log_model()`
+- pytorch: ✅ `mlflow.pytorch.log_model()`
+- tensorflow: ✅ `mlflow.tensorflow.log_model()`
+
+**signature handling:**
+- auto-generates mlflow signature from `model_inputs` and `model_predictions`
+- converts int64 columns to double (prevents schema errors with boolean features)
+- handles missing values at inference time
+
+**when to use:**
+- training runs: enable with `log_model=True`
+- local development: disable with `log_model=False` to save storage
+- CI/CD: control via `MLFLOW_LOG_MODEL` environment variable
+
 ## return dict contract
 
 ```python
 {
     'params': dict,       # required if autolog fails, optional otherwise
     'metrics': dict,      # optional (custom metrics)
-    'artifacts': str,     # optional (path to artifact dir/file)
-    'model_local_path': str,  # optional (for model registry)
-    'model_name': str     # optional (for model registry)
+    'model': object,      # optional (trained model - triggers auto logging)
+    'model_inputs': DataFrame/array,  # optional (for signature inference, recommend .head(5))
+    'model_predictions': array,  # optional (for signature output schema)
+    'signature': ModelSignature,  # optional (auto-generated if model_inputs provided)
+    'input_example': DataFrame/array,  # optional (auto-generated from model_inputs)
+    'artifact_path': str,  # optional (custom model artifact path, default: 'model')
+    'artifacts': str,     # optional (path to additional artifact dir/file)
+    'model_local_path': str,  # optional (legacy - for model registry)
+    'model_name': str     # optional (legacy - for model registry)
 }
 ```
 
