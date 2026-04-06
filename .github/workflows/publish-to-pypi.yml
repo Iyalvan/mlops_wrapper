@@ -1,0 +1,72 @@
+name: publish to PyPI
+
+# trigger on version tags (e.g., v0.3.0, v1.0.0)
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: checkout repository
+      uses: actions/checkout@v4
+
+    - name: set up python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: extract version from tag
+      id: version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/v}
+        echo "version=$VERSION" >> $GITHUB_OUTPUT
+        echo "publishing version: $VERSION"
+
+    - name: verify version matches pyproject.toml
+      run: |
+        TOML_VERSION=$(grep '^version = ' pyproject.toml | cut -d'"' -f2)
+        TAG_VERSION="${{ steps.version.outputs.version }}"
+        if [ "$TOML_VERSION" != "$TAG_VERSION" ]; then
+          echo "error: version mismatch"
+          echo "  pyproject.toml: $TOML_VERSION"
+          echo "  git tag: v$TAG_VERSION"
+          exit 1
+        fi
+        echo "version verified: $TOML_VERSION"
+
+    - name: install build dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install build twine
+
+    - name: build package
+      run: python -m build
+
+    - name: check package
+      run: twine check dist/*
+
+    - name: publish to PyPI
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        password: ${{ secrets.PYPI_API_TOKEN }}
+        print-hash: true
+
+# usage:
+# 1. add PYPI_API_TOKEN to repository secrets:
+#    - go to https://github.com/Iyalvan/mlops_wrapper/settings/secrets/actions
+#    - click "New repository secret"
+#    - name: PYPI_API_TOKEN
+#    - value: your PyPI API token (pypi-AgE...)
+#
+# 2. create and push a version tag:
+#    git tag -a v0.3.0 -m "release v0.3.0: model logging support"
+#    git push origin v0.3.0
+#
+# 3. workflow will automatically:
+#    - build the package
+#    - verify version matches tag
+#    - publish to PyPI

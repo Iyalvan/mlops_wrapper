@@ -130,27 +130,27 @@ def _log_model_by_framework(
     try:
         if framework == 'catboost':
             import mlflow.catboost
-            mlflow.catboost.log_model(cb_model=model, **model_kwargs)
+            model_info = mlflow.catboost.log_model(cb_model=model, **model_kwargs)
         elif framework == 'sklearn':
             import mlflow.sklearn
-            mlflow.sklearn.log_model(sk_model=model, **model_kwargs)
+            model_info = mlflow.sklearn.log_model(sk_model=model, **model_kwargs)
         elif framework == 'xgboost':
             import mlflow.xgboost
-            mlflow.xgboost.log_model(xgb_model=model, **model_kwargs)
+            model_info = mlflow.xgboost.log_model(xgb_model=model, **model_kwargs)
         elif framework == 'lightgbm':
             import mlflow.lightgbm
-            mlflow.lightgbm.log_model(lgb_model=model, **model_kwargs)
+            model_info = mlflow.lightgbm.log_model(lgb_model=model, **model_kwargs)
         elif framework == 'pytorch':
             import mlflow.pytorch
-            mlflow.pytorch.log_model(pytorch_model=model, **model_kwargs)
+            model_info = mlflow.pytorch.log_model(pytorch_model=model, **model_kwargs)
         elif framework == 'tensorflow':
             import mlflow.tensorflow
-            mlflow.tensorflow.log_model(model=model, **model_kwargs)
+            model_info = mlflow.tensorflow.log_model(model=model, **model_kwargs)
         else:
             # fallback to pyfunc for unknown frameworks
             print(f"  warning: unknown framework '{framework}', using mlflow.pyfunc")
             import mlflow.pyfunc
-            mlflow.pyfunc.log_model(python_model=model, **model_kwargs)
+            model_info = mlflow.pyfunc.log_model(python_model=model, **model_kwargs)
 
         print(f"  ✓ model logged successfully")
 
@@ -162,6 +162,8 @@ def _log_model_by_framework(
             print("  info: consider adding 'signature' for better model serving")
         if input_example is None:
             print("  info: consider adding 'input_example' for inference validation")
+
+        return model_info
 
     except Exception as e:
         print(f"  ✗ model logging failed: {e}")
@@ -385,9 +387,10 @@ def mlflow_experiment(
                     mlflow_wrapper.log_metrics(custom_metrics)
 
                 # handle model logging (framework-agnostic)
+                model_info = None
                 if 'model' in result and log_model:
                     try:
-                        _log_model_by_framework(
+                        model_info = _log_model_by_framework(
                             model=result['model'],
                             artifact_path=result.get('artifact_path', 'model'),
                             signature=result.get('signature'),
@@ -400,6 +403,31 @@ def mlflow_experiment(
                         # if model logging fails, warn but don't fail the whole run
                         print(f"warning: model logging failed: {model_log_error}")
                         mlflow.set_tag('mlops.model_log_error', str(model_log_error)[:250])
+
+                # attach extra files to the LoggedModel (serving contract, evaluation, etc.)
+                if 'model_artifacts' in result:
+                    if not log_model:
+                        print("warning: model_artifacts provided but log_model=False — artifacts not attached to any LoggedModel")
+                    elif model_info is None:
+                        print("warning: model_artifacts skipped — model logging did not produce a model_id")
+                    else:
+                        try:
+                            client = mlflow.tracking.MlflowClient()
+                            paths = result['model_artifacts']
+                            if not isinstance(paths, list):
+                                paths = [paths]
+                            for path in paths:
+                                path = str(path)
+                                if os.path.isdir(path):
+                                    client.log_model_artifacts(model_info.model_id, path)
+                                elif os.path.isfile(path):
+                                    client.log_model_artifact(model_info.model_id, path)
+                                else:
+                                    print(f"  warning: model_artifacts path not found, skipping: {path}")
+                            print(f"  ✓ model artifacts uploaded to LoggedModel ({len(paths)} path(s))")
+                        except Exception as artifacts_error:
+                            print(f"warning: model_artifacts upload failed: {artifacts_error}")
+                            mlflow.set_tag('mlops.model_artifacts_error', str(artifacts_error)[:250])
 
                 if "artifacts" in result:
                     mlflow_wrapper.log_artifacts(result["artifacts"])
