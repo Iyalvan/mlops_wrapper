@@ -9,6 +9,8 @@ on:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # required by pypa/gh-action-pypi-publish even when using api token
 
     steps:
     - name: checkout repository
